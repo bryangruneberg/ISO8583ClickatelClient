@@ -1,9 +1,11 @@
 <?php
+include('conf.php');
 include('ClickatellClient.php');
+
 $max_client_tries = 10;
 for($i=0; $i <= $max_client_tries; $i++) {
     try {
-        $client = new ClickatelClient("127.0.0.1", "20007");
+        $client = new ClickatelClient(CLICKA_SERVER, CLICKA_PORT);
         $client->connect();
         $client->loop();
     } catch(Exception $ex) {

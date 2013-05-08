@@ -41,12 +41,16 @@ class ClickatelClient {
     /* Private variable to keep track of the last time we send an echo request */
     private $_last_echo_request = 0;
 
+    /* pointer to a IClickatellTransactionHandler instance */
+    private $_transaction_handler = NULL;
+
     /**
      * Constructor that takes an IP address and a Port
      */
-    public function __construct($ip, $port) {
+    public function __construct($ip, $port, IClickatellTransactionHandler $txHandler) {
         $this->_socket_ip = $ip;
         $this->_socket_port = $port;
+        $this->_transaction_handler = $txHandler;
     } 
 
     /**
