@@ -6,100 +6,142 @@ use Aws\Sqs\SqsClient;
 
 Class CAwsTransactionHandler implements IClickatellTransactionHandler {
 
-    private $_aws_key;
-    private $_aws_secret;
-    private $_aws_region;
-    private $_aws_read_queue;
-    private $_aws_read_queue_url;
+	private $_aws_key;
+	private $_aws_secret;
+	private $_aws_region;
+	private $_aws_read_queue;
+	private $_aws_read_queue_url;
+	private $_aws_success_queue;
+	private $_aws_success_queue_url;
+	private $_aws_fail_queue;
+	private $_aws_fail_queue_url;
 
-    private $_aws_client;
 
-    /**  
-     * constructor
-     */
-    public function __construct($aws_key, $aws_secret, $aws_region, $aws_read_queue) {
-        $this->_aws_region = $aws_region;
-        $this->_aws_key = $aws_key;
-        $this->_aws_secret = $aws_secret;
-        $this->_aws_read_queue = $aws_read_queue;
+	private $_aws_client;
 
-        $this->_aws_client = SqsClient::factory(array(
-                    'key'    => $this->_aws_key,
-                    'secret' => $this->_aws_secret,
-                    'region' => $this->_aws_region
-                    ));
+	/**  
+	 * constructor
+	 */
+	public function __construct($aws_key, $aws_secret, $aws_region, $aws_read_queue, $aws_success_queue, $aws_fail_queue) {
+		$this->_aws_region = $aws_region;
+		$this->_aws_key = $aws_key;
+		$this->_aws_secret = $aws_secret;
+		$this->_aws_read_queue = $aws_read_queue;
+		$this->_aws_success_queue = $aws_success_queue;
+		$this->_aws_fail_queue = $aws_fail_queue;
 
-        $queueUrl = $this->_aws_client->getQueueUrl(array('QueueName'=>$this->_aws_read_queue));
-        $this->_aws_read_queue_url = $queueUrl->get('QueueUrl');
-    }
+		$this->_aws_client = SqsClient::factory(array(
+					'key'    => $this->_aws_key,
+					'secret' => $this->_aws_secret,
+					'region' => $this->_aws_region
+					));
 
-    /**
-     * Must return array
-     *  uid => unique request id
-     *  request_data => array
-     */
-    public function getNextRequest() {
-        $this->logLine('Checking for a new request on AWS queue');
-        $ret = NULL;
+		$queueUrl = $this->_aws_client->getQueueUrl(array('QueueName'=>$this->_aws_read_queue));
+		$this->_aws_read_queue_url = $queueUrl->get('QueueUrl');
 
-        $result = $this->_aws_client->receiveMessage(array(
-                    'QueueUrl' => $this->_aws_read_queue_url
-                    ));
+		$queueUrl = $this->_aws_client->getQueueUrl(array('QueueName'=>$this->_aws_success_queue));
+		$this->_aws_success_queue_url = $queueUrl->get('QueueUrl');
 
-        if(!$result) { return FALSE; }
+		$queueUrl = $this->_aws_client->getQueueUrl(array('QueueName'=>$this->_aws_fail_queue));
+		$this->_aws_fail_queue_url = $queueUrl->get('QueueUrl');
+	}
 
-        $messages = $result->get('Messages');
-        if(is_array($messages)) {
-            $message = array_shift($messages);
-            $ret['uid'] = $message['ReceiptHandle'];
-            $ret['request_data'] = array();
+	/**
+	 * Must return array
+	 *  uid => unique request id
+	 *  request_data => array
+	 */
+	public function getNextRequest() {
+		$this->logLine('Checking for a new request on AWS queue');
+		$ret = NULL;
 
-            $jdata = json_decode($message['Body'], TRUE);
-            if($jdata) {
-              $this->logLine('The request message has been decoded');
-              $ret['request_data'] = $jdata;
-            } else {
-              $this->logLine('The request message is not in JSON format');
-            }
-        }
+		$result = $this->_aws_client->receiveMessage(array(
+					'QueueUrl' => $this->_aws_read_queue_url
+					));
 
-        return $ret;
-    }
+		if(!$result) { return FALSE; }
 
-    /**
-     * This function will be called when we get a success notification from the network
-     */
-    public function requestSucceess($uid, $request_data) {
-        $this->logLine('Request was successfull: ' . $uid);
+		$messages = $result->get('Messages');
+		if(is_array($messages)) {
+			$message = array_shift($messages);
+			$ret['uid'] = $message['ReceiptHandle'];
+			$ret['request_data'] = array();
 
-        $this->_aws_client->deleteMessage(array(
-                    'QueueUrl' => $this->_aws_read_queue_url,
-                    'ReceiptHandle' => $uid
-                    ));
+			$jdata = json_decode($message['Body'], TRUE);
+			if($jdata) {
+				$this->logLine('The request message has been decoded');
+				$ret['request_data'] = $jdata;
+			} else {
+				$this->logLine('The request message is not in JSON format');
+			}
 
-        return TRUE;
-    }
+			if(!isset($ret['request_data']['packet_creator_class'])) {
+				$ret['request_data']['packet_creator_class'] = 'CClickatelTransactionPacketCreator';
+			}
 
-    /**
-     * This function will be called when we get a failure notification from the network
-     */
-    public function requestFailure($uid, $request_data) {
-        $this->logLine('Request failed: ' . $uid);
+			@include_once($ret['request_data']['packet_creator_class'] . ".php");
 
-        $this->_aws_client->deleteMessage(array(
-                    'QueueUrl' => $this->_aws_read_queue_url,
-                    'ReceiptHandle' => $uid
-                    ));
+			if(!class_exists($ret['request_data']['packet_creator_class'])) {
+				throw new Exception('Packet Creator Not Found: ' . $ret['request_data']['packet_creator_class']);
+			}
 
-        return TRUE;
-    }
+		}
 
-    /**
-     * Log a line to the console
-     */
-    public function logLine($line) {
-        echo 'AWSHandler: ' . date('Y-m-d H:i:s') .' ';
-        echo $line . "\n";
-    }
+		return $ret;
+	}
+
+	/**
+	 * This function will be called when we get a success notification from the network
+	 */
+	public function requestSucceess($uid, $request_data) {
+
+		$this->_aws_client->deleteMessage(array(
+					'QueueUrl' => $this->_aws_read_queue_url,
+					'ReceiptHandle' => $uid
+					));
+
+		$this->logLine('Original request removed');
+
+		$msg = array(
+				'QueueUrl'    => $this->_aws_success_queue_url,
+				'MessageBody' => json_encode($request_data)
+			    );
+
+		$this->_aws_client->sendMessage($msg);
+		$this->logLine('Request moved to successfull');
+
+		return TRUE;
+	}
+
+	/**
+	 * This function will be called when we get a failure notification from the network
+	 */
+	public function requestFailure($uid, $request_data) {
+
+		$this->_aws_client->deleteMessage(array(
+					'QueueUrl' => $this->_aws_read_queue_url,
+					'ReceiptHandle' => $uid
+					));
+
+		$this->logLine('Original request removed');
+
+		$msg = array(
+				'QueueUrl'    => $this->_aws_fail_queue_url,
+				'MessageBody' => json_encode($request_data)
+			    );
+
+		$this->_aws_client->sendMessage($msg);
+		$this->logLine('Request moved to failed');
+
+		return TRUE;
+	}
+
+	/**
+	 * Log a line to the console
+	 */
+	public function logLine($line) {
+		echo 'AWSHandler: ' . date('Y-m-d H:i:s') .' ';
+		echo $line . "\n";
+	}
 
 }

@@ -3,8 +3,19 @@ include('conf.php');
 include('ClickatellClient.php');
 include_once('CAwsTransactionHandler.php');
 
-$max_client_tries = 1;
-for($i=0; $i <= $max_client_tries; $i++) {
+$max_client_tries = 10;
+$max_age = 60*60*6; // 6 hours
+$start = time();
+
+for($i=1; $i <= $max_client_tries; $i++) {
+    $age = time() - $start;
+
+    if($age >= $max_age) {
+      echo "We are too old. Time to die.\n";
+      break;
+    }
+    
+
     $client = NULL;
     try {
 	$handler = new CAwsTransactionHandler(CLICKA_AWS_KEY,CLICKA_AWS_SECRET,CLICKA_AWS_REGION,'JUSTINE_CLICKATEL_INTEGRATION_TEST','JUSTINE_CLICKATEL_INTEGRATION_TEST_SUCCESS', 'JUSTINE_CLICKATEL_INTEGRATION_TEST_FAILED');
