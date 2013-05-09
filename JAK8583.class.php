@@ -241,7 +241,7 @@ class JAK8583 {
                 $tmp2[$key-65]	= 1;
             }
         }
-        
+
         $result	= "";
         if ($tmp[0]==1) {
             while ($tmp2!='') {
@@ -258,7 +258,7 @@ class JAK8583 {
         
         return $this->_bitmap;
     }
-    
+
     
     //parse iso string and retrieve mti 
     private function _parseMTI() {

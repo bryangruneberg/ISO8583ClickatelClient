@@ -114,6 +114,7 @@ class ClickatelClient {
                     $this->_last_echo_request = $now;
                     $this->logLine('Time for echo request');
                     $this->txNetworkEchoRequest();
+                    $this->logLine('Sent echo request');
                 }
 
                 $this->txTransactionRequest(rand(1000, 10000), uniqid(), '027826941134', '123456');
@@ -193,10 +194,40 @@ class ClickatelClient {
             $jak->addData($key, $value);
         }
 
-        $iso = $jak->getISO();
-        $header = $jak->getTwoByteVLI($iso);
+	$bma = $jak->getBitMapArray();
 
-        fwrite($this->_socket_fp, pack('C', intval($header[0])) . pack('C', intval($header[1])) . $iso);
+        $header = $jak->getTwoByteVLI(strlen(implode($jak->getData())),$bma['has_secondary']);
+
+	// First send the VLI
+        fwrite($this->_socket_fp, pack('C', intval($header[0])) . pack('C', intval($header[1])));
+        $sstatus = stream_get_meta_data($this->_socket_fp);
+        if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+        if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+
+	// Now send the MTI
+        fwrite($this->_socket_fp, $mti);
+        $sstatus = stream_get_meta_data($this->_socket_fp);
+        if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+        if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+
+	// Now send the bitmaps
+	foreach($bma['primary'] as $byte) {
+		fwrite($this->_socket_fp, pack('C', intval($byte)));
+		$sstatus = stream_get_meta_data($this->_socket_fp);
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+	}
+	if($bma['has_secondary']) {
+		foreach($bma['secondary'] as $byte) {
+			fwrite($this->_socket_fp, pack('C', intval($byte)));
+			$sstatus = stream_get_meta_data($this->_socket_fp);
+			if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+			if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+		}
+	}
+
+	// Now write the data
+        fwrite($this->_socket_fp, implode($jak->getData()));
         $sstatus = stream_get_meta_data($this->_socket_fp);
         if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
         if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
@@ -208,19 +239,21 @@ class ClickatelClient {
     public function rxPacket() {
         if(!$this->_socket_fp) { throw new ConnectionException('Socket error'); }
 
-        $jak	= new C8583();
+        $jak = new C8583();
 
         // Get the first byte from the stream, ensuring the connection is decent
         $b1 = fread($this->_socket_fp, 1);
         $sstatus = stream_get_meta_data($this->_socket_fp);
         if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
         if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+	$this->logLine('Got byte 1');
 
         // Get the second byte from the stream, ensuring the connection is decent
         $b2 = fread($this->_socket_fp, 1);
         $sstatus = stream_get_meta_data($this->_socket_fp);
         if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
         if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+	$this->logLine('Got byte 2');
 
         $byte1 = array_shift(unpack('C', $b1));
         $byte2 = array_shift(unpack('C', $b2));
@@ -229,32 +262,77 @@ class ClickatelClient {
         $ren = $jak->getLengthFromTwoByteVLI($byte1, $byte2);
         $this->logLine("REN: " . $ren);
 
-        // Fetch $ren bytes of data from the stream, ensuring the connection is decent
-        $iso = fread($this->_socket_fp, $ren);
+	// Get the 4 byte MTI
+	$mti = fread($this->_socket_fp, 4);
+        $sstatus = stream_get_meta_data($this->_socket_fp);
+	if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+	if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+	$this->logLine('Got MTI: ' . $mti);
+	$ren -= 4;
+	$this->logLine("REN NOW: " . $ren);
+
+        // Get the primary BITMAP (8bytes)
+	$bma = array('has_secondary' => FALSE, 'primary' => array(),'secondary' => array());
+	for($i = 0; $i <= 7; $i++) {
+		$b1 = fread($this->_socket_fp, 1);
+		$sstatus = stream_get_meta_data($this->_socket_fp);
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+		$ren -= 1;
+		$bma['primary'][] = array_shift(unpack('C', $b1));
+	}
+	$this->logLine('Fetched primary bitmap');
+	$this->logLine("REN NOW: " . $ren);
+
+	if($bma['primary'][0] & 128) {
+	  $bma['has_secondary'] = TRUE;
+	}
+
+	if($bma['has_secondary']) {
+		for($i = 0; $i <= 7; $i++) {
+			$b1 = fread($this->_socket_fp, 1);
+			$sstatus = stream_get_meta_data($this->_socket_fp);
+			if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+			if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+			$ren -= 1;
+			$bma['secondary'][] = array_shift(unpack('C', $b1));
+		}
+		$this->logLine('Fetched secondary bitmap');
+		$this->logLine("REN NOW: " . $ren);
+	}
+        
+	// Fetch $ren bytes of data from the stream, ensuring the connection is decent
+        $ren_data = fread($this->_socket_fp, $ren);
         $sstatus = stream_get_meta_data($this->_socket_fp);
         if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
         if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 
-        //add data
-        $jak->addISO($iso);
-        $this->logLine('ISO: '. $iso);
-        $this->logLine('MTI: '. $jak->getMTI());
-        $this->logLine('Bitmap: '. $jak->getBitmap());
-        $this->logLine('Data Element: ' . print_r($jak->getData(), TRUE));
+	$iso = $jak->getISOString($mti, $bma, $ren_data);
 
-        $jdata = $jak->getData();
+	$retJak = new C8583();
+	$this->logLine("====== RESPONSE DATA FOLLOWS =======");
+
+        //add data
+        $retJak->addISO($iso);
+        $this->logLine('ISO: '. $iso);
+        $this->logLine('MTI: '. $retJak->getMTI());
+        $this->logLine('Bitmap: '. $retJak->getBitmap());
+        $this->logLine('Data Element: ' . print_r($retJak->getData(), TRUE));
+	$this->logLine("====== RESPONSE DATA DONE =======");
+
+        $jdata = $retJak->getData();
         if(!isset($jdata[18])) { throw new ProtocolException('No Client Transaction ID found in packet'); }
         if(!isset($this->_pending_replies[$jdata[18]])) { throw new ProtocolException('Received a Client Transaction ID that we do not know about.'); }
 
-        switch($jak->getMTI()) {
+        switch($retJak->getMTI()) {
             case '0810':
-                $this->rxNetworkEchoReply($jak);
+                $this->rxNetworkEchoReply($retJak);
                 break;
             case '0210':
-                $this->rxTransactionResponse($jak);
+                $this->rxTransactionResponse($retJak);
                 break;
             default:
-                throw new ProtocolException('No idea what to do with MTI: ' . $jak->getMTI());
+                throw new ProtocolException('No idea what to do with MTI: ' . $retJak->getMTI());
         }
     }
 
