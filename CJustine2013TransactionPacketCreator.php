@@ -21,9 +21,16 @@ class CJustine2013TransactionPacketCreator implements ITransactionPacketCreator 
 		if(!isset($_product_map[$data['entrant']['network']])) { throw new Exception('Entrant Network product does not map'); }
 		if(!isset($data['prize'])) { throw new Exception('Prize data is required'); }
 		if(!isset($data['prize']['id'])) { throw new Exception('Prize ID data is required'); }
+		if(!isset($data['prize']['type'])) { throw new Exception('Prize TYPE data is required'); }
+
+		$value = 0;
+		switch($data['prize']['type']) {
+		  case 'voucher250': $value=200; break;
+		  case 'voucher500': $value=500; break;
+		}
 
 		$packet = array(
-				4 => 500,
+				4 => $value,
 				12 => date('His'),
 				13 => date('md'),
 				15 => '0' . $data['entrant']['msisdn'],
