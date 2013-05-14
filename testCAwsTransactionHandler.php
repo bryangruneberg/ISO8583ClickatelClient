@@ -2,7 +2,7 @@
 include_once('conf.php');
 include_once('CAwsTransactionHandler.php');
 
-$handler = new CAwsTransactionHandler(CLICKA_AWS_KEY,CLICKA_AWS_SECRET,CLICKA_AWS_REGION,'JUSTINE_CLICKATEL_INTEGRATION_TEST','JUSTINE_CLICKATEL_INTEGRATION_TEST_SUCCESS', 'JUSTINE_CLICKATEL_INTEGRATION_TEST_FAILED','js2013_transaction');
+$handler = new CAwsTransactionHandler(CLICKA_AWS_KEY,CLICKA_AWS_SECRET,CLICKA_AWS_REGION,'JUSTINE_CLICKATEL_INTEGRATION_TEST','JUSTINE_CLICKATEL_INTEGRATION_TEST_SUCCESS', 'JUSTINE_CLICKATEL_INTEGRATION_TEST_FAILED','JUSTINE_CLICKATEL_INTEGRATION_TEST_ERRORS','js2013_transaction');
 
 $req = $handler->putTransactionInStore('js123','pending','test');
 $req = $handler->putTransactionInStore('js1234','new','test');

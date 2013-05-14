@@ -34,13 +34,7 @@ class ClickatelClient {
 	private $_socket_connect_timeout = 20;
 	private $_socket_read_timeout = 8;
 	private $_seconds_between_network_ping = 60;
-	private $_max_transaction_wait_age = 30;
-	private $_max_transaction_tries = 4;
-
-	/* Private array to keep track of replies we are expecting */
-	private $_pending_replies = array();
-	private $_transaction_tracker = array();
-	private $_transaction_raw_data_tracker = array();	
+	private $_max_transaction_tries = 4000;
 
 	/* Private variable to keep track of the last time we send an echo request */
 	private $_last_echo_request = 0;
@@ -59,7 +53,7 @@ class ClickatelClient {
 		$this->_socket_ip = $ip;
 		$this->_socket_port = $port;
 		$this->_transaction_handler = $txHandler;
-		
+
 		$this->_start_at = time();
 	} 
 
@@ -118,50 +112,46 @@ class ClickatelClient {
 	public function loop() {
 		if(!$this->_socket_fp) { throw new ConnectionException('Socket error'); }
 
+		try {
+			$transactionId = 'netecho';
+			$transaction = $this->_transaction_handler->getTransactionFromStore($transactionId);
+			if($transaction && $transaction['state'] == 'PENDING') {
+				$this->logLine('Flushing out a stale netecho request');
+				$this->_transaction_handler->setTransactionState($transactionId, 'NEW');
+			}
+		} catch(Exception $ex) {
+				$this->logLine('Error checking for stale netecho requests.');
+				return;
+		}
+
 		for(;;) {
 			try {
 				$now = time();
 
+				$pending_transactions = intval($this->_transaction_handler->countTransactionsInState('PENDING'));
+
 				if($now - $this->_start_at >= $this->_max_client_age) {
-				  $age = $now - $this->_start_at;
-				  if(count($this->_pending_replies) <= 0) {
-				     $this->logLine('I have been alive for ' .$age.' seconds, and there are no pending messages. Now is a good time for suicide.');
-				     break;
-				  }
-				}
-
-				if(count($this->_pending_replies)) {
-					$this->logLine('We are waiting for replies, reading from the socket');
-					foreach($this->_pending_replies as $tid => $data) {
-						$age = time() - $data['loaded'];
-						$this->logLine('Transaction ' .$tid.' is ' . $age . ' seconds old');
-						if($age > $this->_max_transaction_wait_age) {
-							if(isset($this->_pending_replies[$tid]['type']) && $this->_pending_replies[$tid]['type'] == 'echo-request') {
-							  throw new ProtocolException('Network echo-request timed out. This should not happen.');
-							}
-
-							$this->logLine('Transaction ' .$tid.' is oldaged. Removing it from the pending queue');
-							unset($this->_pending_replies[$tid]);
-						}
-					}
-
-					if(count($this->_pending_replies)) {
-						try {
-							$this->rxPacket();
-						} catch(TimeoutException $ex) {
-							$this->logLine('No data received yet. Moving on...');
-						}
+					$age = $now - $this->_start_at;
+					if($pending_transactions <= 0) {
+						$this->logLine('I have been alive for ' .$age.' seconds, and there are no pending messages. Now is a good time for suicide.');
+						break;
 					}
 				}
+
 				if(!$this->_last_echo_request || ($now - $this->_last_echo_request) >= $this->_seconds_between_network_ping) {
 					$this->_last_echo_request = $now;
 					$this->logLine('Time for echo request');
 					$this->txNetworkEchoRequest();
 					$this->logLine('Sent echo request');
+
+					try {
+						$this->rxPacket();
+					} catch(TimeoutException $ex) {
+						$this->logLine('No data received from echo-request yet. Moving on... ['.$ex->getMessage().']');
+					}
 				}
 
 				if($rawRequestData = $this->_transaction_handler->getNextRequest()) {
-
 
 					$creatorClass = $rawRequestData['request_data']['packet_creator_class'];
 					$packet = NULL;
@@ -171,18 +161,28 @@ class ClickatelClient {
 						$stan = $this->getNextStan();
 						$packet['11'] = $stan;
 						ksort($packet);
-						$this->_transaction_raw_data_tracker[$packet[18]] = $rawRequestData;
+						$transaction = $this->_transaction_handler->getTransactionFromStore($packet[18]);
+						if(!$transaction) {
+							$this->_transaction_handler->putTransactionInStore($packet[18], 'NEW', json_encode($rawRequestData));
+						} else {
+							$this->_transaction_handler->setTransactionData($packet[18], json_encode($rawRequestData));
+						}
 					} catch(Exception $ex) {
 						$this->logLine('There was an issue creating the datapacket: ' . $ex->getMessage());
+						$packet = NULL;
 					}
 
-					if(is_array($packet) && isset($this->_transaction_tracker[$packet[18]]) && $this->_transaction_tracker[$packet[18]] >= $this->_max_transaction_tries) {
+					if(is_array($packet) && $this->_transaction_handler->getTransactionTransmissionCount($packet[18]) >= $this->_max_transaction_tries) {
 						$this->logLine('Transaction retry count exceeded. Wont retry this transaction now.');
-						$this->logLine('TODO: fail the packet using the handler');
+
+						if(isset($rawRequestData['uid']) && isset($rawRequestData['request_data'])) {
+							$this->_transaction_handler->requestError($rawRequestData['uid'], $rawRequestData['request_data']);
+						}
+						$this->_transaction_handler->setTransactionState($packet[18], 'ERROR');
 					} else if(is_array($packet)) {
-						$tries = (isset($this->_transaction_tracker[$packet[18]])) ? $this->_transaction_tracker[$packet[18]] + 1 : 1;
+						$tries = $this->_transaction_handler->getTransactionTransmissionCount($packet[18]) + 1;
 						$this->logLine('Sending data transaction request... [try '.$tries.']');
-						$this->txTransactionRequest($packet[18], $packet, '0200');
+						$this->txTransactionRequest($packet[18], $packet);
 						$this->logLine('Transmitted!');
 					} else {
 						$this->logLine('There was an issue creating the datapacket: NULL PACKET');
@@ -190,10 +190,20 @@ class ClickatelClient {
 
 				}
 
+				$pending_transactions = intval($this->_transaction_handler->countTransactionsInState('PENDING'));
+				if($pending_transactions) {
+					$this->logLine('We are waiting for replies, reading from the socket');
+					try {
+						$this->rxPacket();
+					} catch(TimeoutException $ex) {
+						$this->logLine('No data received yet. Moving on... ['.$ex->getMessage().']');
+					}
+				}
+
 
 				sleep(rand(1,2));
 			} catch(TimeoutException $ex) {
-				$this->logLine('Timeout sending or receiving data');
+				$this->logLine('Timeout sending or receiving data... ['.$ex->getMessage().']');
 				sleep(rand(1,2));
 				continue;
 			} catch(EOFException $ex) {
@@ -220,30 +230,52 @@ class ClickatelClient {
 
 
 		$stan = $this->getNextStan();
-		$transactionId = uniqid();
+		$transactionId = 'netecho';
 		$data = array(
 				11 => $stan,
 				18 => $transactionId,
 				70 => 301,
 			     );
 
-		$this->_pending_replies[$transactionId] = array('data' => $data, 'mti' => 0800, 'loaded' => time(), 'type' => 'echo-request');
+		$transaction = $this->_transaction_handler->getTransactionFromStore($transactionId);
+		if(!$transaction) {
+		  $this->_transaction_handler->putTransactionInStore($transactionId, 'NEW', json_encode($data));
+		  $transaction = $this->_transaction_handler->getTransactionFromStore($transactionId);
+		}
+
+		if($transaction && $transaction['state'] == 'PENDING') {
+		  throw new ProtocolException('Network echo request not received.');
+		}
+
+		$this->_transaction_handler->setTransactionState($transactionId, 'PENDING');
+
 		$this->txPacket('0800', $data);
 	}
 
 	/**
 	 * Send a transaction request over the wire
 	 */
-	public function txTransactionRequest($transactionId, $data, $mti = '0200') {
+	public function txTransactionRequest($transactionId, $data) {
 		if(!$this->_socket_fp) { throw new ConnectionException('Socket error'); }
-	
-		if(isset($this->_pending_replies[$transactionId])) {
-		  $this->logLine('Transaction ' . $transactionId . ' has already been sent. Refusing to overwrite.');
-		  return;
+
+		$transaction = $this->_transaction_handler->getTransactionFromStore($transactionId);
+		if(!$transaction) {
+			$this->logLine('Transaction ' . $transactionId . ' has not been stored. Refusing to transmit.');
+			return;
 		}
 
-		$this->_pending_replies[$transactionId] = array('data' => $data, 'mti' => $mti, 'loaded' => time(), 'type' => 'transaction');
-		$this->_transaction_tracker[$transactionId] = isset( $this->_transaction_tracker[$transactionId] ) ?  $this->_transaction_tracker[$transactionId] + 1 : 1;
+
+		$mti = '0200';
+		if(isset($transaction['state']) && $transaction['state'] != 'NEW'  ) {
+			$this->logLine('Transaction ' . $transactionId . ' is '.$transaction['state'].'. Setting MTI to 0201.');
+			$mti = '0201';
+		}
+
+		if(isset($transaction['state']) && $transaction['state'] == 'NEW'  ) {
+		  $this->_transaction_handler->setTransactionState($transactionId,'PENDING');
+		}
+
+		$this->_transaction_handler->incrementTransactionTransmissionCount($transactionId);
 		$this->txPacket($mti, $data);
 	}
 
@@ -266,38 +298,32 @@ class ClickatelClient {
 		$header = $jak->getTwoByteVLI(strlen(implode($jak->getData())),$bma['has_secondary']);
 
 		// First send the VLI
-		fwrite($this->_socket_fp, pack('C', intval($header[0])) . pack('C', intval($header[1])));
-		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
-		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+		$written = fwrite($this->_socket_fp, pack('C', intval($header[0])) . pack('C', intval($header[1])));
+		if(!$written || $written != 2) { throw new TimeoutException('Timeout writing VLI'); }
 
 		// Now send the MTI
-		fwrite($this->_socket_fp, $mti);
-		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
-		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+		$written = fwrite($this->_socket_fp, $mti);
+		if(!$written || $written != 4) { throw new TimeoutException('Timeout writing MTI'); }
 
 		// Now send the bitmaps
 		foreach($bma['primary'] as $byte) {
-			fwrite($this->_socket_fp, pack('C', intval($byte)));
-			$sstatus = stream_get_meta_data($this->_socket_fp);
-			if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
-			if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+			$written = fwrite($this->_socket_fp, pack('C', intval($byte)));
+			if(!$written || $written != 1) { throw new TimeoutException('Timeout writing a primary bitmap byte'); }
 		}
+
 		if($bma['has_secondary']) {
 			foreach($bma['secondary'] as $byte) {
-				fwrite($this->_socket_fp, pack('C', intval($byte)));
-				$sstatus = stream_get_meta_data($this->_socket_fp);
-				if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
-				if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+				$written = fwrite($this->_socket_fp, pack('C', intval($byte)));
+				if(!$written || $written != 1) { throw new TimeoutException('Timeout writing a seondary bitmap byte'); }
 			}
 		}
 
 		// Now write the data
-		fwrite($this->_socket_fp, implode($jak->getData()));
-		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
-		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
+		$dta = implode($jak->getData());
+		$written = fwrite($this->_socket_fp, $dta);
+		if(!$written || $written != strlen($dta)) { throw new TimeoutException('Timeout writing the data (dta)'); }
+		
+		$this->logLine('Transmitted ['.$mti.'] : ' . print_r($data, TRUE));
 	}
 
 	/**
@@ -311,14 +337,14 @@ class ClickatelClient {
 		// Get the first byte from the stream, ensuring the connection is decent
 		$b1 = fread($this->_socket_fp, 1);
 		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading byte 1'); }
 		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 		$this->logLine('Got byte 1');
 
 		// Get the second byte from the stream, ensuring the connection is decent
 		$b2 = fread($this->_socket_fp, 1);
 		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading byte 2'); }
 		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 		$this->logLine('Got byte 2');
 
@@ -332,7 +358,7 @@ class ClickatelClient {
 		// Get the 4 byte MTI
 		$mti = fread($this->_socket_fp, 4);
 		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading MTI'); }
 		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 		$this->logLine('Got MTI: ' . $mti);
 		$ren -= 4;
@@ -343,7 +369,7 @@ class ClickatelClient {
 		for($i = 0; $i <= 7; $i++) {
 			$b1 = fread($this->_socket_fp, 1);
 			$sstatus = stream_get_meta_data($this->_socket_fp);
-			if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+			if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading primary bitmap ['.$i.']'); }
 			if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 			$ren -= 1;
 			$bma['primary'][] = array_shift(unpack('C', $b1));
@@ -359,7 +385,7 @@ class ClickatelClient {
 			for($i = 0; $i <= 7; $i++) {
 				$b1 = fread($this->_socket_fp, 1);
 				$sstatus = stream_get_meta_data($this->_socket_fp);
-				if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+				if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading secondary bitmap ['.$i.']'); }
 				if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 				$ren -= 1;
 				$bma['secondary'][] = array_shift(unpack('C', $b1));
@@ -371,7 +397,7 @@ class ClickatelClient {
 		// Fetch $ren bytes of data from the stream, ensuring the connection is decent
 		$ren_data = fread($this->_socket_fp, $ren);
 		$sstatus = stream_get_meta_data($this->_socket_fp);
-		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout'); }
+		if(isset($sstatus['timed_out']) && $sstatus['timed_out'] == 1) { throw new TimeoutException('Timeout reading data ['.$ren.']'); }
 		if(isset($sstatus['eof']) && $sstatus['eof'] == 1) { throw new EOFException('EOF'); }
 
 		$iso = $jak->getISOString($mti, $bma, $ren_data);
@@ -387,7 +413,9 @@ class ClickatelClient {
 
 		$jdata = $retJak->getData();
 		if(!isset($jdata[18])) { throw new ProtocolException('No Client Transaction ID found in packet'); }
-		if(!isset($this->_pending_replies[$jdata[18]])) { throw new ProtocolException('Received a Client Transaction ID that we do not know about.'); }
+
+		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);	
+		if(!$transaction) { throw new ProtocolException('Received a Client Transaction ID that we do not know about.'); }
 
 		switch($retJak->getMTI()) {
 			case '0810':
@@ -407,8 +435,7 @@ class ClickatelClient {
 	public function rxNetworkEchoReply(C8583 $jak) {
 		$this->logLine('MTI: Echo Response');
 		$jdata = $jak->getData();
-		// We can remove this from pending replies
-		unset($this->_pending_replies[$jdata[18]]);
+		$this->_transaction_handler->setTransactionState($jdata[18],'COMPLETE');
 	}
 
 	/**
@@ -417,24 +444,26 @@ class ClickatelClient {
 	public function rxTransactionResponse(C8583 $jak) {
 		$this->logLine('MTI: Transaction Response');
 		$jdata = $jak->getData();
-		$rawData = isset($this->_transaction_raw_data_tracker[$jdata[18]]) ? $this->_transaction_raw_data_tracker[$jdata[18]] : array();
-		if(is_array($rawData) && count($rawData) && isset($rawData['uid'])) {
 
-		  if(isset($jdata[39]) && $jdata[39] == "0000") {
-		    $rd = $rawData['request_data'];
-		    $rd['jdata'] = $jdata;
-		    $this->_transaction_handler->requestSucceess($rawData['uid'], $rd);
-		  } else {
-		    $rd = $rawData['request_data'];
-		    $rd['jdata'] = $jdata;
-		    $this->_transaction_handler->requestFailure($rawData['uid'], $rd);
-		  }
-
-		  $this->_transaction_tracker[$jdata[18]] = 0;
-		  unset($this->_transaction_raw_data_tracker[$jdata[18]]);
+		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);	
+		if(!$transaction) { throw new ProtocolException('Trying to rxTransactionResponse on a transaction that we do not know about.'); }
+		$rawData = json_decode($transaction['data'], TRUE);
+		if(!$rawData) {
+			$rawData = array();
 		}
 
-		// We can remove this from pending replies
-		unset($this->_pending_replies[$jdata[18]]);
+		if(is_array($rawData) && count($rawData) && isset($rawData['uid'])) {
+			if(isset($jdata[39]) && $jdata[39] == "0000") {
+				$rd = $rawData['request_data'];
+				$rd['jdata'] = $jdata;
+				$this->_transaction_handler->requestSucceess($rawData['uid'], $rd);
+			} else {
+				$rd = $rawData['request_data'];
+				$rd['jdata'] = $jdata;
+				$this->_transaction_handler->requestFailure($rawData['uid'], $rd);
+			}
+		}
+
+		$this->_transaction_handler->setTransactionState($jdata[18],'COMPLETE');
 	}
 }

@@ -19,6 +19,16 @@ Interface IClickatellTransactionHandler {
   public function requestFailure($uid, $request_data);
 
   /**
+   * This function will be called when we get an error with a transaction
+   */
+  public function requestError($uid, $request_data);
+
+  /**
+   * Set the data for a transaction
+   */
+  public function setTransactionData($id, $data);
+
+  /**
    * Put a transaction in the store in a specific state
    */
   public function putTransactionInStore($id, $state, $data);
@@ -27,7 +37,6 @@ Interface IClickatellTransactionHandler {
    * Get a transaction from the store
    */
   public function getTransactionFromStore($id);
-
 
   /**
    * Count the number of transactions in a specific state
