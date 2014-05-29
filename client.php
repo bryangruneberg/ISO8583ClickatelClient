@@ -14,11 +14,17 @@ for($i=1; $i <= $max_client_tries; $i++) {
       echo "We are too old. Time to die.\n";
       break;
     }
-    
+
 
     $client = NULL;
     try {
-	$handler = new CAwsTransactionHandler(CLICKA_AWS_KEY,CLICKA_AWS_SECRET,CLICKA_AWS_REGION,'JUSTINE_CLICKATEL_INTEGRATION_TEST','JUSTINE_CLICKATEL_INTEGRATION_TEST_SUCCESS', 'JUSTINE_CLICKATEL_INTEGRATION_TEST_FAILED','JUSTINE_CLICKATEL_INTEGRATION_TEST_ERRORS','js2013_transaction');
+
+	$handler = new CAwsTransactionHandler(CLICKA_AWS_KEY,CLICKA_AWS_SECRET,CLICKA_AWS_REGION,
+		'JUSTINE_AIRTIME_DELIVERY',
+		'JUSTINE_AIRTIME_DELIVERY_SUCCESS',
+		'JUSTINE_AIRTIME_DELIVERY_FAILED',
+		'JUSTINE_AIRTIME_DELIVERY_ERRORS','js2013_transaction');
+
         $client = new ClickatelClient(CLICKA_SERVER, CLICKA_PORT, $handler);
     } catch (Exception $ex) {
 	echo "Error starting AWS and Clickatel subsystems";
