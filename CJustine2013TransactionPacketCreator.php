@@ -1,4 +1,4 @@
-<?php 
+<?php
 
 require_once('ITransactionPacketCreator.php');
 
@@ -25,8 +25,8 @@ class CJustine2013TransactionPacketCreator implements ITransactionPacketCreator 
 
 		$value = 0;
 		switch($data['prize']['type']) {
-		  case 'voucher250': $value=200; break;
-		  case 'voucher500': $value=500; break;
+		  case 'voucher250': $value=25000; break;
+		  case 'voucher500': $value=50000; break;
 		}
 
 		$packet = array(
@@ -40,4 +40,4 @@ class CJustine2013TransactionPacketCreator implements ITransactionPacketCreator 
 
 		return $packet;
 	}
-} 
+}
