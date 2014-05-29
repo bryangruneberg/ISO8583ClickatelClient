@@ -34,7 +34,7 @@ class ClickatelClient {
 	private $_socket_connect_timeout = 20;
 	private $_socket_read_timeout = 8;
 	private $_seconds_between_network_ping = 60;
-	private $_max_transaction_tries = 4000;
+	private $_max_transaction_tries = 1;
 
 	/* Private variable to keep track of the last time we send an echo request */
 	private $_last_echo_request = 0;
@@ -55,7 +55,7 @@ class ClickatelClient {
 		$this->_transaction_handler = $txHandler;
 
 		$this->_start_at = time();
-	} 
+	}
 
 	/**
 	 * Function to connect to the provided ip and port
@@ -88,7 +88,7 @@ class ClickatelClient {
 		echo 'ClickClient: ' . date('Y-m-d H:i:s') . "] ";
 		echo $line;
 		echo "\n";
-	} 
+	}
 
 	/**
 	 * Return the next Systems Trace Audit Number (rolling incremental number from 000001 to 999999)
@@ -183,6 +183,7 @@ class ClickatelClient {
 						$tries = $this->_transaction_handler->getTransactionTransmissionCount($packet[18]) + 1;
 						$this->logLine('Sending data transaction request... [try '.$tries.']');
 						$this->txTransactionRequest($packet[18], $packet);
+						sleep(5);
 						$this->logLine('Transmitted!');
 					} else {
 						$this->logLine('There was an issue creating the datapacket: NULL PACKET');
@@ -322,7 +323,7 @@ class ClickatelClient {
 		$dta = implode($jak->getData());
 		$written = fwrite($this->_socket_fp, $dta);
 		if(!$written || $written != strlen($dta)) { throw new TimeoutException('Timeout writing the data (dta)'); }
-		
+
 		$this->logLine('Transmitted ['.$mti.'] : ' . print_r($data, TRUE));
 	}
 
@@ -414,7 +415,7 @@ class ClickatelClient {
 		$jdata = $retJak->getData();
 		if(!isset($jdata[18])) { throw new ProtocolException('No Client Transaction ID found in packet'); }
 
-		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);	
+		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);
 		if(!$transaction) { throw new ProtocolException('Received a Client Transaction ID that we do not know about.'); }
 
 		switch($retJak->getMTI()) {
@@ -445,7 +446,7 @@ class ClickatelClient {
 		$this->logLine('MTI: Transaction Response');
 		$jdata = $jak->getData();
 
-		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);	
+		$transaction = $this->_transaction_handler->getTransactionFromStore($jdata[18]);
 		if(!$transaction) { throw new ProtocolException('Trying to rxTransactionResponse on a transaction that we do not know about.'); }
 		$rawData = json_decode($transaction['data'], TRUE);
 		if(!$rawData) {
